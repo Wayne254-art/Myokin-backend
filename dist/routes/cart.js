@@ -21,9 +21,11 @@ cartRouter.post('/quote', asyncHandler(async (req, res) => {
     let coupon = null;
     if (input.couponCode) {
         const now = new Date();
-        coupon = await prisma.coupon.findFirst({ where: { code: input.couponCode.toUpperCase(), isActive: true, AND: [{ OR: [{ startsAt: null }, { startsAt: { lte: now } }] }, { OR: [{ expiresAt: null }, { expiresAt: { gte: now } }] }] } });
-        if (!coupon || (coupon.usageLimit != null && coupon.usageCount >= coupon.usageLimit))
-            throw new AppError(400, 'That coupon has expired or is unavailable.');
+        coupon = await prisma.coupon.findUnique({ where: { code: input.couponCode.toUpperCase() } });
+        if (!coupon)
+            throw new AppError(400, 'Invalid coupon.');
+        if (!coupon.isActive || (coupon.startsAt && coupon.startsAt > now) || (coupon.expiresAt && coupon.expiresAt < now) || (coupon.usageLimit != null && coupon.usageCount >= coupon.usageLimit))
+            throw new AppError(400, 'Expired coupon.');
         if (coupon.minimumSpend && subtotal < Number(coupon.minimumSpend))
             throw new AppError(400, `This coupon requires a minimum spend of KSh ${Number(coupon.minimumSpend).toLocaleString()}.`);
     }
