@@ -24,8 +24,12 @@ authRouter.post('/register', asyncHandler(async (req, res) => {
 authRouter.post('/login', asyncHandler(async (req, res) => {
     const data = credentials.parse(req.body);
     const existing = await prisma.user.findUnique({ where: { email: data.email } });
-    if (!existing || existing.status !== 'ACTIVE' || !await bcrypt.compare(data.password, existing.passwordHash))
-        throw new AppError(401, 'Email or password is incorrect.');
+    if (!existing || !await bcrypt.compare(data.password, existing.passwordHash))
+        throw new AppError(401, 'Incorrect Credentials.');
+    if (existing.status === 'SUSPENDED')
+        throw new AppError(403, 'Account has been suspended. Please contact support.');
+    if (existing.status === 'DISABLED')
+        throw new AppError(403, 'Account has been disabled. Please contact support.');
     await issueSession(existing.id, existing.role, res);
     const user = await prisma.user.findUniqueOrThrow({ where: { id: existing.id }, select: publicUser });
     res.json({ success: true, data: { user, accessToken: signAccessToken(user.id, user.role) } });

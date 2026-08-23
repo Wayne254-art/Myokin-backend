@@ -4,6 +4,7 @@ import { prisma } from '../config/prisma.js';
 import { authenticate } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/async.js';
 import { AppError } from '../utils/errors.js';
+import { calculateDelivery, calculateDiscount, calculateTax, calculateTotal } from '../services/pricing.js';
 export const cartRouter = Router();
 const cartInclude = { items: { include: { product: { include: { images: { take: 1, orderBy: { sortOrder: 'asc' } }, brand: true } }, variant: true }, orderBy: { createdAt: 'asc' } } };
 const identity = (req) => req.user ? { userId: req.user.id } : req.sessionId ? { sessionId: req.sessionId } : null;
@@ -11,6 +12,32 @@ const getCart = async (req, create = false) => { const owner = identity(req); if
     throw new AppError(400, 'A session ID is required.'); const cart = await prisma.cart.findFirst({ where: owner, include: cartInclude }); if (cart || !create)
     return cart; return prisma.cart.create({ data: owner, include: cartInclude }); };
 cartRouter.get('/', asyncHandler(async (req, res) => res.json({ success: true, data: await getCart(req) })));
+cartRouter.post('/quote', asyncHandler(async (req, res) => {
+    const input = z.object({ couponCode: z.string().trim().optional(), deliveryZoneId: z.string().optional() }).parse(req.body);
+    const cart = await getCart(req);
+    const items = cart?.items ?? [];
+    const itemCount = items.reduce((sum, item) => sum + item.quantity, 0);
+    const subtotal = items.reduce((sum, item) => sum + Number(item.unitPrice) * item.quantity, 0);
+    let coupon = null;
+    if (input.couponCode) {
+        const now = new Date();
+        coupon = await prisma.coupon.findFirst({ where: { code: input.couponCode.toUpperCase(), isActive: true, AND: [{ OR: [{ startsAt: null }, { startsAt: { lte: now } }] }, { OR: [{ expiresAt: null }, { expiresAt: { gte: now } }] }] } });
+        if (!coupon || (coupon.usageLimit != null && coupon.usageCount >= coupon.usageLimit))
+            throw new AppError(400, 'That coupon has expired or is unavailable.');
+        if (coupon.minimumSpend && subtotal < Number(coupon.minimumSpend))
+            throw new AppError(400, `This coupon requires a minimum spend of KSh ${Number(coupon.minimumSpend).toLocaleString()}.`);
+    }
+    const discount = calculateDiscount(subtotal, coupon && { type: coupon.type, value: Number(coupon.value), minimumSpend: coupon.minimumSpend == null ? null : Number(coupon.minimumSpend), maximumDiscount: coupon.maximumDiscount == null ? null : Number(coupon.maximumDiscount) });
+    const zone = input.deliveryZoneId ? await prisma.deliveryZone.findFirst({ where: { id: input.deliveryZoneId, isActive: true } }) : null;
+    if (input.deliveryZoneId && !zone)
+        throw new AppError(400, 'That delivery area is not currently available.');
+    const settings = await prisma.storeSetting.findUnique({ where: { id: 'store' } });
+    const taxRate = Number(settings?.taxRate ?? 0);
+    const tax = calculateTax(subtotal, discount, taxRate);
+    const deliveryFee = zone ? calculateDelivery(subtotal, Number(zone.fee), zone.freeDeliveryThreshold == null ? null : Number(zone.freeDeliveryThreshold)) : null;
+    const total = calculateTotal(subtotal, discount, deliveryFee ?? 0, tax);
+    res.json({ success: true, data: { itemCount, subtotal, discount, taxableAmount: Math.max(0, subtotal - discount), taxRate, tax, deliveryFee, total, deliveryPending: !zone, coupon: coupon ? { code: coupon.code, description: coupon.description } : null, deliveryZone: zone ? { id: zone.id, name: zone.name, estimatedDays: zone.estimatedDays } : null } });
+}));
 cartRouter.post('/items', asyncHandler(async (req, res) => { const input = z.object({ productId: z.string(), variantId: z.string().optional(), quantity: z.number().int().min(1).max(20).default(1), replace: z.boolean().default(false) }).parse(req.body); const product = await prisma.product.findFirst({ where: { id: input.productId, isActive: true }, include: { variants: true } }); if (!product)
     throw new AppError(404, 'Product not found.'); const cart = await getCart(req, true); const existing = await prisma.cartItem.findFirst({ where: { cartId: cart.id, productId: product.id, variantId: input.variantId ?? null } }); const finalQuantity = existing && !input.replace ? existing.quantity + input.quantity : input.quantity; const stock = input.variantId ? product.variants.find(v => v.id === input.variantId)?.stockQuantity : product.stockQuantity; if (stock == null || stock < finalQuantity)
     throw new AppError(409, `Only ${stock ?? 0} item(s) are currently available.`); if (existing)
@@ -32,7 +59,7 @@ cartRouter.post('/merge', authenticate, asyncHandler(async (req, res) => { const
     } await tx.cart.delete({ where: { id: guest.id } }); }); res.json({ success: true, data: await prisma.cart.findUnique({ where: { id: userCart.id }, include: cartInclude }) }); }));
 export const wishlistRouter = Router();
 wishlistRouter.use(authenticate);
-wishlistRouter.get('/', asyncHandler(async (req, res) => res.json({ success: true, data: await prisma.wishlist.upsert({ where: { userId: req.user.id }, create: { userId: req.user.id }, update: {}, include: { items: { include: { product: { include: { images: { take: 1 }, brand: true } } } } } }) })));
-wishlistRouter.post('/:productId', asyncHandler(async (req, res) => { const wishlist = await prisma.wishlist.upsert({ where: { userId: req.user.id }, create: { userId: req.user.id }, update: {} }); await prisma.wishlistItem.upsert({ where: { wishlistId_productId: { wishlistId: wishlist.id, productId: String(req.params.productId) } }, create: { wishlistId: wishlist.id, productId: String(req.params.productId) }, update: {} }); res.status(201).json({ success: true }); }));
+wishlistRouter.get('/', asyncHandler(async (req, res) => res.json({ success: true, data: await prisma.wishlist.upsert({ where: { userId: req.user.id }, create: { userId: req.user.id }, update: {}, include: { items: { include: { product: { include: { images: { take: 1 }, brand: true, category: true } } } } } }) })));
+wishlistRouter.post('/:productId', asyncHandler(async (req, res) => { const wishlist = await prisma.wishlist.upsert({ where: { userId: req.user.id }, create: { userId: req.user.id }, update: {} }); await prisma.wishlistItem.upsert({ where: { wishlistId_productId: { wishlistId: wishlist.id, productId: String(req.params.productId) } }, create: { wishlistId: wishlist.id, productId: String(req.params.productId) }, update: {} }); res.status(201).json({ success: true, data: await prisma.wishlist.findUnique({ where: { id: wishlist.id }, include: { items: { include: { product: { include: { images: { take: 1 }, brand: true, category: true } } } } } }) }); }));
 wishlistRouter.delete('/:productId', asyncHandler(async (req, res) => { const wishlist = await prisma.wishlist.findUnique({ where: { userId: req.user.id } }); if (wishlist)
     await prisma.wishlistItem.deleteMany({ where: { wishlistId: wishlist.id, productId: String(req.params.productId) } }); res.status(204).end(); }));
