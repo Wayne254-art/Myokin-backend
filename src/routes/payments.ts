@@ -14,7 +14,7 @@ paymentsRouter.get('/paystack/verify/:reference', authenticate, asyncHandler(asy
 paymentsRouter.post('/paystack/webhook', asyncHandler(async (req, res) => { if (!env.PAYSTACK_SECRET_KEY) throw new AppError(503, 'Payment is not configured.'); const signature = req.header('x-paystack-signature'); const digest = crypto.createHmac('sha512', env.PAYSTACK_SECRET_KEY).update(req.rawBody ?? Buffer.from(JSON.stringify(req.body))).digest('hex'); if (!signature || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest))) throw new AppError(401, 'Invalid webhook signature.'); if (req.body.event === 'charge.success') await confirmPayment(req.body.data.reference, req.body.data); res.status(200).json({ received: true }) }))
 
 async function confirmPayment(reference: string, gateway: any) {
-  await prisma.$transaction(async (tx) => {
+  const complete = async () => prisma.$transaction(async (tx) => {
     const payment = await tx.payment.findUnique({ where: { reference }, include: { order: { include: { items: true } } } })
     if (!payment || payment.status === 'PAID') return
     if (gateway.status !== 'success' || gateway.currency !== 'KES' || Number(gateway.amount) !== Math.round(Number(payment.amount) * 100)) throw new AppError(400, 'Payment verification did not match the order total.')
@@ -24,8 +24,20 @@ async function confirmPayment(reference: string, gateway: any) {
     }
     await tx.payment.update({ where: { id: payment.id }, data: { status: 'PAID', channel: gateway.channel, paidAt: new Date(), gatewayResponse: gateway.gateway_response, rawResponse: gateway } })
     await tx.order.update({ where: { id: payment.orderId }, data: { paymentStatus: 'PAID', status: 'CONFIRMED', statusHistory: { create: { status: 'CONFIRMED', note: 'Payment confirmed' } } } })
-    await tx.cart.deleteMany({ where: { userId: payment.userId ?? undefined } })
-  }, { isolationLevel: 'Serializable' })
+    // Keep the user's bag ready for their next purchase, but remove every item that
+    // was just bought. Deleting cart items avoids a parent-record delete race.
+    if (payment.userId) await tx.cartItem.deleteMany({ where: { cart: { userId: payment.userId } } })
+  }, { isolationLevel: 'Serializable', maxWait: 10_000, timeout: 20_000 })
+
+  // The Paystack callback and the browser verification can arrive together. Retrying
+  // serialisation/expired-transaction conflicts makes payment confirmation idempotent.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { await complete(); return }
+    catch (error: any) {
+      const retryable = error?.code === 'P2028' || error?.code === 'P2034'
+      if (!retryable || attempt === 2) throw error
+    }
+  }
 }
 
 

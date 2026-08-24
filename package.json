@@ -14,6 +14,7 @@
     "prisma:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^6.19.0",
     "bcryptjs": "^3.0.2",
     "cloudinary": "^2.8.0",
@@ -25,6 +26,7 @@
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
+    "pg": "^8.23.0",
     "zod": "^4.1.12"
   },
   "devDependencies": {

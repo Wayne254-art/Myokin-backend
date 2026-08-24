@@ -36,7 +36,15 @@ authRouter.post('/login', asyncHandler(async (req, res) => {
 authRouter.post('/refresh', asyncHandler(async (req, res) => {
   const token = req.cookies?.refreshToken as string | undefined
   if (!token) throw new AppError(401, 'Your session has expired. Please sign in again.')
-  const payload = jwt.verify(token, env.JWT_REFRESH_SECRET) as jwt.JwtPayload
+  let payload: jwt.JwtPayload
+  try {
+    payload = jwt.verify(token, env.JWT_REFRESH_SECRET) as jwt.JwtPayload
+  } catch {
+    // A stale, corrupted, or manually altered cookie is an expected client-side state.
+    // Clear it and return a normal authentication response instead of logging a stack trace.
+    res.clearCookie('refreshToken', { path: '/api/auth' })
+    throw new AppError(401, 'Your session has expired. Please sign in again.')
+  }
   const stored = await prisma.refreshToken.findUnique({ where: { tokenHash: hashToken(token) }, include: { user: true } })
   if (!stored || stored.expiresAt < new Date() || stored.user.status !== 'ACTIVE' || stored.userId !== payload.sub) throw new AppError(401, 'Your session has expired. Please sign in again.')
   res.json({ success: true, data: { accessToken: signAccessToken(stored.user.id, stored.user.role) } })
@@ -49,5 +57,4 @@ async function issueSession(id: string, role: string, res: Parameters<typeof aut
   await prisma.refreshToken.create({ data: { userId: id, tokenHash: hashToken(refreshToken), expiresAt: new Date(Date.now() + 30 * 86400_000) } })
   res.cookie('refreshToken', refreshToken, refreshCookie)
 }
-
 

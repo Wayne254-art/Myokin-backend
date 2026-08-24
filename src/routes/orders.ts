@@ -8,9 +8,18 @@ import { calculateDelivery, calculateDiscount, calculateTax, calculateTotal } fr
 
 export const ordersRouter = Router()
 ordersRouter.use(authenticate)
-const address = z.object({ firstName: z.string().min(2), lastName: z.string().min(2), email: z.string().email(), phone: z.string().min(9), county: z.string().min(2), town: z.string().min(2), addressLine1: z.string().min(5), landmark: z.string().optional(), notes: z.string().optional() })
+const requiredText = (label: string, min: number) => z.string().trim().min(min, `${label} is required and must be at least ${min} characters.`)
+const address = z.object({
+  firstName: requiredText('First name', 2), lastName: requiredText('Last name', 2),
+  email: z.string().trim().email('Enter a valid email address.'),
+  phone: z.string().trim().transform(value => value.replace(/[\s-]/g, '')).pipe(z.string().regex(/^(?:\+?254|0)[17]\d{8}$/, 'Enter a valid Kenyan mobile number beginning with 01 or 07, e.g. 0111 239 949.')),
+  county: requiredText('County', 2), town: requiredText('Town or locality', 2),
+  addressLine1: requiredText('Street, building or house address', 5),
+  landmark: z.string().trim().max(120, 'Landmark must be 120 characters or fewer.').optional(),
+  notes: z.string().trim().max(500, 'Delivery notes must be 500 characters or fewer.').optional()
+})
 ordersRouter.post('/', asyncHandler(async (req, res) => {
-  const input = z.object({ address, deliveryZoneId: z.string(), couponCode: z.string().optional(), paymentMethod: z.literal('PAYSTACK') }).parse(req.body)
+  const input = z.object({ address, deliveryZoneId: z.string().min(1, 'Select a delivery area.'), couponCode: z.string().optional(), paymentMethod: z.literal('PAYSTACK') }).parse(req.body)
   const cart = await prisma.cart.findFirst({ where: { userId: req.user!.id }, include: { items: { include: { product: { include: { images: { take: 1 } } }, variant: true } } } })
   if (!cart?.items.length) throw new AppError(400, 'Your beauty bag is empty.')
   const zone = await prisma.deliveryZone.findFirst({ where: { id: input.deliveryZoneId, isActive: true } })
