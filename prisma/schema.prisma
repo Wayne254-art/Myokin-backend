@@ -162,7 +162,7 @@ model Product {
   slug               String              @unique
   sku                String              @unique
   shortDescription   String?
-  description        String
+  description        String?
   categoryId         String
   category           Category            @relation(fields: [categoryId], references: [id])
   brandId            String
@@ -187,6 +187,7 @@ model Product {
   hairType           String[]
   concerns           String[]
   size               String?
+  videoUrl           String?
   weight             Int?
   seoTitle           String?
   seoDescription     String?

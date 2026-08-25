@@ -46,7 +46,10 @@ authRouter.post('/refresh', asyncHandler(async (req, res) => {
     throw new AppError(401, 'Your session has expired. Please sign in again.')
   }
   const stored = await prisma.refreshToken.findUnique({ where: { tokenHash: hashToken(token) }, include: { user: true } })
-  if (!stored || stored.expiresAt < new Date() || stored.user.status !== 'ACTIVE' || stored.userId !== payload.sub) throw new AppError(401, 'Your session has expired. Please sign in again.')
+  if (!stored || stored.expiresAt < new Date() || stored.user.status !== 'ACTIVE' || stored.userId !== payload.sub) { res.clearCookie('refreshToken', { path: '/api/auth' }); throw new AppError(401, 'Your session has expired. Please sign in again.') }
+  // Rotate the refresh credential on every use so a copied/old token cannot be replayed.
+  await prisma.refreshToken.delete({ where: { id: stored.id } })
+  await issueSession(stored.user.id, stored.user.role, res)
   res.json({ success: true, data: { accessToken: signAccessToken(stored.user.id, stored.user.role) } })
 }))
 authRouter.post('/logout', asyncHandler(async (req, res) => { const token = req.cookies?.refreshToken; if (token) await prisma.refreshToken.deleteMany({ where: { tokenHash: hashToken(token) } }); res.clearCookie('refreshToken', { path: '/api/auth' }); res.status(204).end() }))
@@ -57,4 +60,3 @@ async function issueSession(id: string, role: string, res: Parameters<typeof aut
   await prisma.refreshToken.create({ data: { userId: id, tokenHash: hashToken(refreshToken), expiresAt: new Date(Date.now() + 30 * 86400_000) } })
   res.cookie('refreshToken', refreshToken, refreshCookie)
 }
-
