@@ -13,7 +13,8 @@ const getCart = async (req, create = false) => { const owner = identity(req); if
     return cart; return prisma.cart.create({ data: owner, include: cartInclude }); };
 cartRouter.get('/', asyncHandler(async (req, res) => res.json({ success: true, data: await getCart(req) })));
 cartRouter.post('/quote', asyncHandler(async (req, res) => {
-    const input = z.object({ couponCode: z.string().trim().optional(), deliveryZoneId: z.string().optional() }).parse(req.body);
+    const input = z.object({ couponCode: z.string().trim().optional(), deliveryZoneId: z.string().optional(), fulfilmentMethod: z.enum(['DELIVERY', 'PICKUP']).default('DELIVERY') }).parse(req.body);
+    const fulfilmentMethod = input.deliveryZoneId === 'PICKUP' ? 'PICKUP' : input.fulfilmentMethod;
     const cart = await getCart(req);
     const items = cart?.items ?? [];
     const itemCount = items.reduce((sum, item) => sum + item.quantity, 0);
@@ -30,15 +31,16 @@ cartRouter.post('/quote', asyncHandler(async (req, res) => {
             throw new AppError(400, `This coupon requires a minimum spend of KSh ${Number(coupon.minimumSpend).toLocaleString()}.`);
     }
     const discount = calculateDiscount(subtotal, coupon && { type: coupon.type, value: Number(coupon.value), minimumSpend: coupon.minimumSpend == null ? null : Number(coupon.minimumSpend), maximumDiscount: coupon.maximumDiscount == null ? null : Number(coupon.maximumDiscount) });
-    const zone = input.deliveryZoneId ? await prisma.deliveryZone.findFirst({ where: { id: input.deliveryZoneId, isActive: true } }) : null;
-    if (input.deliveryZoneId && !zone)
+    const zone = input.deliveryZoneId && input.deliveryZoneId !== 'PICKUP' && input.deliveryZoneId !== 'BASE_DELIVERY' ? await prisma.deliveryZone.findFirst({ where: { id: input.deliveryZoneId, isActive: true } }) : null;
+    if (input.deliveryZoneId && input.deliveryZoneId !== 'PICKUP' && input.deliveryZoneId !== 'BASE_DELIVERY' && !zone)
         throw new AppError(400, 'That delivery area is not currently available.');
     const settings = await prisma.storeSetting.findUnique({ where: { id: 'store' } });
     const taxRate = Number(settings?.taxRate ?? 0);
     const tax = calculateTax(subtotal, discount, taxRate);
-    const deliveryFee = zone ? calculateDelivery(subtotal, Number(zone.fee), zone.freeDeliveryThreshold == null ? null : Number(zone.freeDeliveryThreshold)) : null;
-    const total = calculateTotal(subtotal, discount, deliveryFee ?? 0, tax);
-    res.json({ success: true, data: { itemCount, subtotal, discount, taxableAmount: Math.max(0, subtotal - discount), taxRate, tax, deliveryFee, total, deliveryPending: !zone, coupon: coupon ? { code: coupon.code, description: coupon.description } : null, deliveryZone: zone ? { id: zone.id, name: zone.name, estimatedDays: zone.estimatedDays } : null } });
+    const baseDeliveryFee = Number(settings?.defaultDeliveryFee ?? 0);
+    const deliveryFee = fulfilmentMethod === 'PICKUP' ? 0 : zone ? calculateDelivery(subtotal, Number(zone.fee), zone.freeDeliveryThreshold == null ? null : Number(zone.freeDeliveryThreshold)) : baseDeliveryFee;
+    const total = calculateTotal(subtotal, discount, deliveryFee, tax);
+    res.json({ success: true, data: { itemCount, subtotal, discount, taxableAmount: Math.max(0, subtotal - discount), taxRate, tax, deliveryFee, total, deliveryPending: fulfilmentMethod === 'DELIVERY' && !zone && input.deliveryZoneId !== 'BASE_DELIVERY', coupon: coupon ? { code: coupon.code, description: coupon.description } : null, deliveryZone: zone ? { id: zone.id, name: zone.name, estimatedDays: zone.estimatedDays } : null } });
 }));
 cartRouter.post('/items', asyncHandler(async (req, res) => { const input = z.object({ productId: z.string(), variantId: z.string().optional(), quantity: z.number().int().min(1).max(20).default(1), replace: z.boolean().default(false) }).parse(req.body); const product = await prisma.product.findFirst({ where: { id: input.productId, isActive: true }, include: { variants: true } }); if (!product)
     throw new AppError(404, 'Product not found.'); const cart = await getCart(req, true); const existing = await prisma.cartItem.findFirst({ where: { cartId: cart.id, productId: product.id, variantId: input.variantId ?? null } }); const finalQuantity = existing && !input.replace ? existing.quantity + input.quantity : input.quantity; const stock = input.variantId ? product.variants.find(v => v.id === input.variantId)?.stockQuantity : product.stockQuantity; if (stock == null || stock < finalQuantity)
